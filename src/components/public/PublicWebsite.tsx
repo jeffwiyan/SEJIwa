@@ -15,17 +15,28 @@ import { SafeImage } from '../common/SafeImage';
 interface PublicWebsiteProps {
   onAuthenticate: (input: {
     mode: 'login' | 'register';
+    accountType: 'user' | 'admin';
     name: string;
     email: string;
     password: string;
     termsAccepted: boolean;
   }) => Promise<void>;
+  onRequestPasswordReset: (email: string) => Promise<{ message: string; resetUrl?: string }>;
+  onResetPassword: (token: string, password: string) => Promise<void>;
 }
 
-export function PublicWebsite({ onAuthenticate }: PublicWebsiteProps) {
-  const [activeSection, setActiveSection] = useState<PublicSection>('landing');
+export function PublicWebsite({ onAuthenticate, onRequestPasswordReset, onResetPassword }: PublicWebsiteProps) {
+  const [activeSection, setActiveSection] = useState<PublicSection>(
+    () => new URLSearchParams(window.location.search).has('resetToken') ? 'auth' : 'landing'
+  );
   const [selectedTopicId, setSelectedTopicId] = useState<string>('stres');
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'forgot' | 'reset'>(
+    () => new URLSearchParams(window.location.search).has('resetToken') ? 'reset' : 'login'
+  );
+  const [authAudience, setAuthAudience] = useState<'user' | 'admin'>('user');
+  const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get('resetToken') || '');
+  const [resetUrl, setResetUrl] = useState('');
+  const [resetMessage, setResetMessage] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -39,37 +50,59 @@ export function PublicWebsite({ onAuthenticate }: PublicWebsiteProps) {
 
   const handleAuthSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!email.includes('@') || password.trim().length < 12) {
-      setAuthError('Masukkan email valid dan kata sandi minimal 12 karakter.');
-      return;
-    }
-    if (!termsAccepted) {
-      setAuthError('Setujui syarat dan ketentuan sebelum melanjutkan.');
-      return;
-    }
-    if (authMode === 'register' && fullName.trim().length < 2) {
-      setAuthError('Masukkan nama lengkap Anda untuk mendaftar.');
-      return;
-    }
-    if (authMode === 'register' && password !== confirmPassword) {
-      setAuthError('Konfirmasi kata sandi belum sama.');
-      return;
-    }
     setAuthError('');
     setSubmitting(true);
     try {
-      await onAuthenticate({
-        mode: authMode,
-        name: fullName.trim(),
-        email: email.trim(),
-        password,
-        termsAccepted,
-      });
+      if (authMode === 'forgot') {
+        if (!email.includes('@')) throw new Error('Masukkan alamat email yang valid.');
+        const result = await onRequestPasswordReset(email.trim());
+        setResetUrl(result.resetUrl || '');
+        setResetMessage(result.message);
+      } else if (authMode === 'reset') {
+        if (!resetToken) throw new Error('Tautan pemulihan tidak ditemukan. Minta tautan baru.');
+        if (password.length < 12) throw new Error('Kata sandi harus memiliki minimal 12 karakter.');
+        if (password !== confirmPassword) throw new Error('Konfirmasi kata sandi belum sama.');
+        await onResetPassword(resetToken, password);
+        window.history.replaceState({}, '', `${window.location.pathname}#auth`);
+        setResetToken('');
+        setAuthMode('login');
+        setPassword('');
+        setConfirmPassword('');
+        setResetMessage('Kata sandi berhasil diatur ulang. Silakan masuk dengan kata sandi baru.');
+      } else {
+        if (!email.includes('@') || (authMode === 'register' && password.length < 12)) {
+          throw new Error('Masukkan email valid dan kata sandi minimal 12 karakter.');
+        }
+        if (authMode === 'register' && !termsAccepted) {
+          throw new Error('Setujui syarat dan ketentuan sebelum mendaftar.');
+        }
+        if (authMode === 'register' && fullName.trim().length < 2) {
+          throw new Error('Masukkan nama lengkap Anda untuk mendaftar.');
+        }
+        if (authMode === 'register' && password !== confirmPassword) {
+          throw new Error('Konfirmasi kata sandi belum sama.');
+        }
+        await onAuthenticate({
+          mode: authMode,
+          accountType: authAudience,
+          name: fullName.trim(),
+          email: email.trim(),
+          password,
+          termsAccepted,
+        });
+      }
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Proses belum berhasil. Silakan coba kembali.');
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const setAudience = (audience: 'user' | 'admin') => {
+    setAuthAudience(audience);
+    setAuthMode('login');
+    setAuthError('');
+    setResetMessage('');
   };
 
   const onEnterPortal = (
@@ -135,21 +168,56 @@ export function PublicWebsite({ onAuthenticate }: PublicWebsiteProps) {
             <div className="w-full max-w-md space-y-6">
               <div>
                 <h1 className="font-['Fraunces'] text-3xl font-semibold text-[#17221B] tracking-tight">
-                  {authMode === 'login' ? 'Selamat datang kembali' : 'Buat akun SEJIWA'}
+                  {authMode === 'reset'
+                    ? 'Atur ulang kata sandi'
+                    : authMode === 'forgot'
+                      ? 'Pulihkan akun SEJIWA'
+                      : authMode === 'register'
+                        ? 'Buat akun SEJIWA'
+                        : authAudience === 'admin' ? 'Masuk administrator' : 'Selamat datang kembali'}
                 </h1>
                 <p className="mt-2 text-sm text-[#52635A] leading-relaxed">
-                  {authMode === 'login'
-                    ? 'Masuk untuk mengakses jadwal konseling, materi psikologi, dan layanan dukungan karyawan.'
-                    : 'Daftarkan email kantor atau pribadi Anda untuk memulai pendampingan.'}
+                  {authMode === 'reset'
+                    ? 'Buat kata sandi baru. Gunakan minimal 12 karakter.'
+                    : authMode === 'forgot'
+                      ? 'Masukkan email akun Anda. Jika terdaftar, kami akan mengirim tautan pemulihan.'
+                      : authMode === 'register'
+                        ? 'Buat akun pengguna untuk mencari dukungan dan mengakses layanan SEJIWA.'
+                        : authAudience === 'admin'
+                          ? 'Akses khusus administrator. Akun administrator hanya dibuat oleh pengelola.'
+                          : 'Masuk untuk mencari dukungan psikologis dan mengakses layanan SEJIWA.'}
                 </p>
               </div>
 
+              {!['forgot', 'reset'].includes(authMode) && <div className="grid grid-cols-2 gap-1 rounded-lg bg-[#EFF3EF] p-1">
+                <button
+                  type="button"
+                  onClick={() => setAudience('user')}
+                  className={`rounded-md px-4 py-2 text-xs font-semibold transition-colors ${
+                    authAudience === 'user' ? 'bg-white text-[#17221B] shadow-sm' : 'text-[#52635A]'
+                  }`}
+                >
+                  Pengguna layanan
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAudience('admin')}
+                  className={`rounded-md px-4 py-2 text-xs font-semibold transition-colors ${
+                    authAudience === 'admin' ? 'bg-white text-[#17221B] shadow-sm' : 'text-[#52635A]'
+                  }`}
+                >
+                  Administrator
+                </button>
+              </div>}
+
+              {authAudience === 'user' && !['forgot', 'reset'].includes(authMode) && (
               <div className="inline-flex p-1 bg-[#EFF3EF] rounded-lg">
                 <button
                   type="button"
                   onClick={() => {
                     setAuthMode('login');
                     setAuthError('');
+                    setResetMessage('');
                   }}
                   className={`px-4 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap cursor-pointer ${
                     authMode === 'login'
@@ -164,6 +232,7 @@ export function PublicWebsite({ onAuthenticate }: PublicWebsiteProps) {
                   onClick={() => {
                     setAuthMode('register');
                     setAuthError('');
+                    setResetMessage('');
                   }}
                   className={`px-4 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap cursor-pointer ${
                     authMode === 'register'
@@ -174,6 +243,7 @@ export function PublicWebsite({ onAuthenticate }: PublicWebsiteProps) {
                   Daftar Akun
                 </button>
               </div>
+              )}
 
               <form onSubmit={handleAuthSubmit} className="space-y-4">
                 {authMode === 'register' && (
@@ -184,6 +254,8 @@ export function PublicWebsite({ onAuthenticate }: PublicWebsiteProps) {
                     <input
                       id="auth-fullname"
                       type="text"
+                      required
+                      autoComplete="name"
                       value={fullName}
                       onChange={(e) => setFullName(e.target.value)}
                       placeholder="Contoh: Nadhira Alyssa"
@@ -192,44 +264,50 @@ export function PublicWebsite({ onAuthenticate }: PublicWebsiteProps) {
                   </div>
                 )}
 
-                <div>
+                {authMode !== 'reset' && <div>
                   <label htmlFor="auth-email" className="block text-xs font-semibold text-[#2E3D34] mb-1.5">
                     Alamat Email
                   </label>
                   <input
                     id="auth-email"
                     type="email"
+                    required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
                     placeholder="nama@perusahaan.id"
                     className="w-full px-3.5 py-2.5 text-sm bg-white border border-[#D4DDD6] rounded-lg focus:outline-none focus:border-[#1E3A2F]"
                   />
-                </div>
+                </div>}
 
-                <div>
+                {authMode !== 'forgot' && <div>
                   <label htmlFor="auth-password" className="block text-xs font-semibold text-[#2E3D34] mb-1.5">
-                    Kata Sandi
+                    {authMode === 'reset' ? 'Kata Sandi Baru' : 'Kata Sandi'}
                   </label>
                   <input
                     id="auth-password"
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
+                    required
                     placeholder="Minimal 12 karakter"
                     minLength={12}
                     autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
                     className="w-full px-3.5 py-2.5 text-sm bg-white border border-[#D4DDD6] rounded-lg focus:outline-none focus:border-[#1E3A2F]"
                   />
-                </div>
+                </div>}
 
-                {authMode === 'register' && (
+                {(authMode === 'register' || authMode === 'reset') && (
                   <div>
                     <label htmlFor="auth-confirm-password" className="block text-xs font-semibold text-[#2E3D34] mb-1.5">
-                      Konfirmasi Kata Sandi
+                      {authMode === 'reset' ? 'Konfirmasi Kata Sandi Baru' : 'Konfirmasi Kata Sandi'}
                     </label>
                     <input
                       id="auth-confirm-password"
                       type="password"
+                      required
                       value={confirmPassword}
                       onChange={(e) => setConfirmPassword(e.target.value)}
                       autoComplete="new-password"
@@ -238,7 +316,7 @@ export function PublicWebsite({ onAuthenticate }: PublicWebsiteProps) {
                   </div>
                 )}
 
-                <label className="flex items-start gap-2.5 text-xs leading-relaxed text-[#52635A]">
+                {authMode === 'register' && <label className="flex items-start gap-2.5 text-xs leading-relaxed text-[#52635A]">
                   <input
                     type="checkbox"
                     checked={termsAccepted}
@@ -246,8 +324,15 @@ export function PublicWebsite({ onAuthenticate }: PublicWebsiteProps) {
                     className="mt-0.5 accent-[#1E3A2F]"
                   />
                   <span>Saya telah membaca dan menyetujui syarat penggunaan serta pemrosesan data SEJIWA.</span>
-                </label>
+                </label>}
 
+                {resetMessage && <p role="status" className="text-xs font-medium text-[#166534]">{resetMessage}</p>}
+                {resetUrl && (
+                  <p className="rounded-lg bg-[#EFF3EF] p-3 text-xs leading-relaxed text-[#2E3D34]">
+                    Tautan pemulihan untuk pengujian lokal:{' '}
+                    <a href={resetUrl} className="font-semibold underline">Buka formulir reset</a>
+                  </p>
+                )}
                 {authError && (
                   <p role="alert" className="text-xs font-medium text-[#B91C1C]">
                     {authError}
@@ -259,12 +344,51 @@ export function PublicWebsite({ onAuthenticate }: PublicWebsiteProps) {
                   disabled={submitting}
                   className="w-full py-2.5 px-4 text-sm font-semibold text-white bg-[#1E3A2F] hover:bg-[#162C23] disabled:opacity-60 rounded-lg transition-colors cursor-pointer"
                 >
-                  {submitting ? 'Memproses…' : authMode === 'login' ? 'Masuk ke SEJIWA' : 'Daftar & Mulai'}
+                  {submitting
+                    ? 'Memproses…'
+                    : authMode === 'register'
+                      ? 'Daftar & Mulai'
+                      : authMode === 'forgot'
+                        ? 'Kirim tautan pemulihan'
+                        : authMode === 'reset'
+                          ? 'Simpan kata sandi baru'
+                          : authAudience === 'admin' ? 'Masuk sebagai administrator' : 'Masuk ke SEJIWA'}
                 </button>
               </form>
 
+              {authMode === 'login' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('forgot');
+                    setAuthError('');
+                    setResetMessage('');
+                    setResetUrl('');
+                  }}
+                  className="text-xs font-semibold text-[#1E3A2F] hover:underline"
+                >
+                  Lupa kata sandi?
+                </button>
+              )}
+              {(authMode === 'forgot' || authMode === 'reset') && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('login');
+                    setAuthError('');
+                    setResetMessage('');
+                    setResetUrl('');
+                  }}
+                  className="text-xs font-semibold text-[#1E3A2F] hover:underline"
+                >
+                  Kembali ke masuk
+                </button>
+              )}
+
               <p className="pt-4 border-t border-[#E6EBE7] text-xs leading-relaxed text-[#52635A]">
-                Akun psikolog, petugas aduan, dan administrator dibuat oleh pengelola. Pendaftaran publik hanya membuat akun karyawan.
+                {authAudience === 'admin'
+                  ? 'Portal administrator terpisah dari pendaftaran pengguna. Jika belum memiliki akun, hubungi pengelola SEJIWA.'
+                  : 'Pendaftaran membuat akun pengguna layanan. Akun administrator dan petugas dibuat oleh pengelola.'}
               </p>
             </div>
           </div>

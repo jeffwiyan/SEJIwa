@@ -3,16 +3,20 @@ import path from 'node:path';
 import process from 'node:process';
 import express from 'express';
 import dotenv from 'dotenv';
+import { fileURLToPath } from 'node:url';
 import { createDatabase } from './db.mjs';
 import { createApiRouter } from './api.mjs';
 
-const root = process.cwd();
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const localEnv = path.resolve(root, '.env.local');
 dotenv.config({ path: fs.existsSync(localEnv) ? localEnv : path.resolve(root, '.env') });
 
 if (process.argv.includes('--production')) process.env.NODE_ENV = 'production';
 
-const db = createDatabase();
+const databasePath = process.env.DATABASE_PATH || './data/sejiwa.sqlite';
+const db = createDatabase(
+  databasePath === ':memory:' ? databasePath : path.resolve(root, databasePath),
+);
 const app = express();
 const port = Number(process.env.PORT || 3000);
 
@@ -36,6 +40,7 @@ if (process.env.NODE_ENV === 'production') {
 } else {
   const { createServer } = await import('vite');
   vite = await createServer({
+    root,
     configFile: path.resolve(root, 'vite.config.ts'),
     server: { middlewareMode: true, hmr: { server: undefined } },
     appType: 'spa',

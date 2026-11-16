@@ -67,6 +67,7 @@ export default function App() {
 
   const handleAuthenticate = async (input: {
     mode: 'login' | 'register';
+    accountType: 'user' | 'admin';
     name: string;
     email: string;
     password: string;
@@ -75,11 +76,16 @@ export default function App() {
     setPortalError('');
     const result = input.mode === 'register'
       ? await api.register(input.name, input.email, input.password, input.termsAccepted)
-      : await api.login(input.email, input.password, input.termsAccepted);
+      : await api.login(input.email, input.password, input.accountType);
     setUser(result.user);
     setPortalMode(result.portal);
     setEmployeeView('dashboard');
     await refresh();
+  };
+
+  const handleRequestPasswordReset = (email: string) => api.requestPasswordReset(email);
+  const handleResetPassword = async (token: string, password: string) => {
+    await api.resetPassword(token, password);
   };
 
   const handleLogout = async () => {
@@ -210,7 +216,11 @@ export default function App() {
             {portalError}
           </div>
         )}
-        <PublicWebsite onAuthenticate={handleAuthenticate} />
+        <PublicWebsite
+          onAuthenticate={handleAuthenticate}
+          onRequestPasswordReset={handleRequestPasswordReset}
+          onResetPassword={handleResetPassword}
+        />
       </>
     );
   }

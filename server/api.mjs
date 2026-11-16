@@ -9,6 +9,7 @@ import { createId, getPublicContent } from './db.mjs';
 
 const SESSION_COOKIE = 'sejiwa_session';
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
 const TERMS_VERSION = '2026-11';
 const validRoles = new Set(['employee', 'psychologist', 'casemanager', 'admin']);
 const complaintCategories = new Set([
@@ -28,6 +29,7 @@ const sessionStatuses = new Map([
 ]);
 
 const loginAttempts = new Map();
+const passwordResetAttempts = new Map();
 const dummySalt = randomBytes(16).toString('hex');
 const dummyPasswordHash = scryptSync(randomBytes(32), dummySalt, 64).toString('hex');
 
@@ -277,20 +279,32 @@ export function createApiRouter(db) {
     const passwordHash = scryptSync(password, salt, 64).toString('hex');
     const id = createId('user');
     const createdAt = now();
-    db.prepare(`
-      INSERT INTO users (id, full_name, email, role, password_hash, password_salt, created_at)
-      VALUES (?, ?, ?, 'employee', ?, ?, ?)
-    `).run(id, name.trim(), normalizedEmail, passwordHash, salt, createdAt);
-    db.prepare('INSERT INTO terms_acceptance (id, user_id, version, accepted_at) VALUES (?, ?, ?, ?)')
-      .run(createId('terms'), id, TERMS_VERSION, createdAt);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare(`
+        INSERT INTO users (id, full_name, email, role, password_hash, password_salt, created_at)
+        VALUES (?, ?, ?, 'employee', ?, ?, ?)
+      `).run(id, name.trim(), normalizedEmail, passwordHash, salt, createdAt);
+      db.prepare('INSERT INTO terms_acceptance (id, user_id, version, accepted_at) VALUES (?, ?, ?, ?)')
+        .run(createId('terms'), id, TERMS_VERSION, createdAt);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      if (error.code === 'ERR_SQLITE_CONSTRAINT_UNIQUE') {
+        return response.status(409).json({ error: 'Email tersebut sudah terdaftar.' });
+      }
+      throw error;
+    }
     return issueSession(db, request, response, id);
   });
 
   router.post('/auth/login', (request, response) => {
-    const { email, password, termsAccepted } = request.body || {};
-    if (!termsAccepted) return response.status(400).json({ error: 'Setujui syarat dan ketentuan sebelum masuk.' });
+    const { email, password, accountType = 'user' } = request.body || {};
     if (typeof email !== 'string' || typeof password !== 'string' || email.length > 254 || password.length > 256) {
       return response.status(400).json({ error: 'Masukkan email dan kata sandi yang valid.' });
+    }
+    if (!['user', 'admin'].includes(accountType)) {
+      return response.status(400).json({ error: 'Jenis akun tidak valid.' });
     }
 
     const ip = request.ip || request.socket.remoteAddress || 'unknown';
@@ -305,13 +319,164 @@ export function createApiRouter(db) {
     const isValid = user
       ? verifyPassword(password, user.password_salt, user.password_hash)
       : verifyPassword(password, dummySalt, dummyPasswordHash);
-    if (!user || !isValid) {
+    const expectedRole = accountType === 'admin' ? 'admin' : null;
+    if (!user || !isValid || (expectedRole && user.role !== expectedRole) || (!expectedRole && user.role === 'admin')) {
       attempt.count += 1;
       loginAttempts.set(ip, attempt);
-      return response.status(401).json({ error: 'Email atau kata sandi tidak sesuai.' });
+      return response.status(401).json({
+        error: accountType === 'admin'
+          ? 'Akun administrator tidak ditemukan atau kata sandi tidak sesuai.'
+          : 'Email atau kata sandi pengguna tidak sesuai.',
+      });
     }
     loginAttempts.delete(ip);
     return issueSession(db, request, response, user.id);
+  });
+
+  router.post('/auth/password-reset/request', async (request, response) => {
+    const { email } = request.body || {};
+    if (typeof email !== 'string' || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return response.status(400).json({ error: 'Masukkan alamat email yang valid.' });
+    }
+
+    const configuredMailer = Boolean(
+      process.env.RESEND_API_KEY
+      && process.env.PASSWORD_RESET_FROM
+      && process.env.APP_BASE_URL
+    );
+    if (configuredMailer) {
+      try {
+        const appUrl = new URL(process.env.APP_BASE_URL);
+        if (process.env.NODE_ENV === 'production' && appUrl.protocol !== 'https:') {
+          return response.status(503).json({ error: 'APP_BASE_URL harus menggunakan HTTPS untuk pemulihan kata sandi.' });
+        }
+      } catch {
+        return response.status(503).json({ error: 'Konfigurasi APP_BASE_URL untuk pemulihan kata sandi tidak valid.' });
+      }
+    }
+    if (process.env.NODE_ENV === 'production' && !configuredMailer) {
+      return response.status(503).json({
+        error: 'Pemulihan kata sandi belum dikonfigurasi. Hubungi administrator SEJIWA.',
+      });
+    }
+
+    const ip = request.ip || request.socket.remoteAddress || 'unknown';
+    const attempt = passwordResetAttempts.get(ip) || { count: 0, resetAt: Date.now() + 15 * 60 * 1000 };
+    if (Date.now() > attempt.resetAt) {
+      attempt.count = 0;
+      attempt.resetAt = Date.now() + 15 * 60 * 1000;
+    }
+    if (attempt.count >= 5) {
+      return response.status(429).json({ error: 'Terlalu banyak permintaan pemulihan. Coba lagi dalam beberapa menit.' });
+    }
+    attempt.count += 1;
+    passwordResetAttempts.set(ip, attempt);
+
+    const user = db.prepare('SELECT id, email FROM users WHERE email = ? AND active = 1')
+      .get(email.trim().toLowerCase());
+    let resetUrl;
+    if (user) {
+      const token = randomBytes(32).toString('base64url');
+      const createdAt = now();
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').run(user.id);
+        db.prepare(`
+          INSERT INTO password_reset_tokens (token_hash, user_id, expires_at, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(tokenDigest(token), user.id, new Date(Date.now() + PASSWORD_RESET_TTL_MS).toISOString(), createdAt);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+
+      const baseUrl = configuredMailer
+        ? process.env.APP_BASE_URL
+        : request.get('origin') || `http://${request.get('host')}`;
+      const resetLink = new URL('/', baseUrl);
+      resetLink.searchParams.set('resetToken', token);
+      resetLink.hash = 'auth';
+      resetUrl = resetLink.toString();
+
+      if (configuredMailer) {
+        let delivery;
+        try {
+          delivery = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              from: process.env.PASSWORD_RESET_FROM,
+              to: [user.email],
+              subject: 'Atur ulang kata sandi SEJIWA',
+              html: `<p>Gunakan tautan berikut untuk mengatur ulang kata sandi SEJIWA Anda. Tautan berlaku selama 30 menit dan hanya dapat digunakan sekali.</p><p><a href="${resetUrl}">Atur ulang kata sandi</a></p><p>Jika Anda tidak meminta pemulihan ini, abaikan email ini.</p>`,
+            }),
+          });
+        } catch (error) {
+          db.prepare('DELETE FROM password_reset_tokens WHERE token_hash = ?').run(tokenDigest(token));
+          console.error('Password reset email delivery failed:', error);
+          return response.status(502).json({ error: 'Layanan email pemulihan belum dapat dijangkau. Coba kembali nanti.' });
+        }
+        if (!delivery.ok) {
+          db.prepare('DELETE FROM password_reset_tokens WHERE token_hash = ?').run(tokenDigest(token));
+          console.error('Password reset email delivery failed with HTTP status:', delivery.status);
+          return response.status(502).json({ error: 'Email pemulihan belum dapat dikirim. Coba kembali nanti.' });
+        }
+      }
+    }
+
+    const result = { message: 'Jika email terdaftar, instruksi pemulihan akan dikirim.' };
+    if (user && !configuredMailer && process.env.NODE_ENV !== 'production') result.resetUrl = resetUrl;
+    return response.status(202).json(result);
+  });
+
+  router.post('/auth/password-reset/confirm', (request, response) => {
+    const { token, password } = request.body || {};
+    if (typeof token !== 'string' || token.length > 128
+      || typeof password !== 'string' || password.length < 12 || password.length > 256) {
+      return response.status(400).json({ error: 'Tautan pemulihan atau kata sandi tidak valid.' });
+    }
+    const tokenHash = tokenDigest(token);
+    const reset = db.prepare(`
+      SELECT user_id FROM password_reset_tokens
+      WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
+    `).get(tokenHash, now());
+    if (!reset) {
+      return response.status(400).json({ error: 'Tautan pemulihan tidak valid atau sudah kedaluwarsa.' });
+    }
+
+    const salt = randomBytes(16).toString('hex');
+    const passwordHash = scryptSync(password, salt, 64).toString('hex');
+    const resetAt = now();
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const used = db.prepare(`
+        UPDATE password_reset_tokens SET used_at = ?
+        WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
+      `).run(resetAt, tokenHash, resetAt);
+      if (!used.changes) {
+        db.exec('ROLLBACK');
+        return response.status(400).json({ error: 'Tautan pemulihan tidak valid atau sudah kedaluwarsa.' });
+      }
+      const updated = db.prepare('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ? AND active = 1')
+        .run(passwordHash, salt, reset.user_id);
+      if (!updated.changes) {
+        db.exec('ROLLBACK');
+        return response.status(400).json({ error: 'Tautan pemulihan tidak valid atau sudah kedaluwarsa.' });
+      }
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(reset.user_id);
+      db.prepare('DELETE FROM password_reset_tokens WHERE user_id = ? AND token_hash != ?')
+        .run(reset.user_id, tokenHash);
+      audit(db, reset.user_id, 'user.password.reset', 'user', reset.user_id);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+    return response.json({ message: 'Kata sandi berhasil diatur ulang. Silakan masuk kembali.' });
   });
 
   router.get('/auth/me', (request, response) => {

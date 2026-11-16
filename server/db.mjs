@@ -209,6 +209,10 @@ function seedDemoUsers(db) {
     INSERT OR IGNORE INTO users (id, full_name, email, role, password_hash, password_salt, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
+  const updateDemoUser = db.prepare(`
+    UPDATE users SET full_name = ?, email = ?, password_hash = ?, password_salt = ?, active = 1
+    WHERE id = ? AND role = ?
+  `);
   const firstPsychologist = db.prepare('SELECT id FROM psychologists WHERE id = ?');
   for (const [prefix, defaultName, role] of configurations) {
     const email = process.env[`${prefix}_EMAIL`];
@@ -218,7 +222,19 @@ function seedDemoUsers(db) {
     const id = `demo-${role}`;
     const salt = randomBytes(16).toString('hex');
     const passwordHash = scryptSync(password, salt, 64).toString('hex');
-    insert.run(id, process.env[`${prefix}_NAME`] || defaultName, email.trim().toLowerCase(), role, passwordHash, salt, isoNow());
+    const name = process.env[`${prefix}_NAME`] || defaultName;
+    const normalizedEmail = email.trim().toLowerCase();
+    const emailOwner = db.prepare('SELECT id FROM users WHERE email = ?').get(normalizedEmail);
+    if (emailOwner && emailOwner.id !== id) {
+      throw new Error(`Configured ${role} email is already assigned to another account.`);
+    }
+    const existing = db.prepare('SELECT id FROM users WHERE id = ? AND role = ?').get(id, role);
+    if (existing) {
+      updateDemoUser.run(name, normalizedEmail, passwordHash, salt, id, role);
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
+    } else {
+      insert.run(id, name, normalizedEmail, role, passwordHash, salt, isoNow());
+    }
     if (role === 'psychologist') {
       const profile = firstPsychologist.get('psy-1');
       if (profile) {

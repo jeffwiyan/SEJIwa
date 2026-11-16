@@ -104,27 +104,48 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error('Layanan belum dapat dijangkau. Pastikan server SEJIWA sedang berjalan.');
   }
 
-  if (!response.ok) {
-    const body = await response.json().catch(() => null) as { error?: string } | null;
-    throw new Error(body?.error || 'Permintaan belum berhasil. Silakan coba kembali.');
-  }
   if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  const responseText = await response.text();
+  let body: { error?: string } | null = null;
+  try {
+    body = responseText ? JSON.parse(responseText) as { error?: string } : null;
+  } catch {
+    if (!response.ok) {
+      throw new Error(`Layanan mengembalikan HTTP ${response.status} tanpa respons API yang valid.`);
+    }
+    throw new Error('Respons layanan tidak dapat dibaca. Coba muat ulang halaman.');
+  }
+  if (!response.ok) {
+    throw new Error(body?.error || `Permintaan gagal dengan HTTP ${response.status}.`);
+  }
+  return body as T;
 }
 
 export const api = {
   me: () => request<AuthResponse>('/auth/me'),
 
-  login: (email: string, password: string, termsAccepted: boolean) =>
+  login: (email: string, password: string, accountType: 'user' | 'admin') =>
     request<AuthenticatedResponse>('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email, password, termsAccepted }),
+      body: JSON.stringify({ email, password, accountType }),
     }),
 
   register: (name: string, email: string, password: string, termsAccepted: boolean) =>
     request<AuthenticatedResponse>('/auth/register', {
       method: 'POST',
       body: JSON.stringify({ name, email, password, termsAccepted }),
+    }),
+
+  requestPasswordReset: (email: string) =>
+    request<{ message: string; resetUrl?: string }>('/auth/password-reset/request', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+
+  resetPassword: (token: string, password: string) =>
+    request<{ message: string }>('/auth/password-reset/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ token, password }),
     }),
 
   logout: () => request<void>('/auth/logout', { method: 'POST' }),

@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomBytes, scryptSync } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { after, before, test } from 'node:test';
 import express from 'express';
 import { createApiRouter } from './api.mjs';
@@ -35,11 +38,11 @@ async function call(path, { user, method = 'GET', body } = {}) {
   return { response, data };
 }
 
-async function login(email, user) {
+async function login(email, user, accountType = 'user') {
   const result = await call('/auth/login', {
     user,
     method: 'POST',
-    body: { email, password, termsAccepted: true },
+    body: { email, password, accountType },
   });
   assert.equal(result.response.status, 200);
   assert.ok(cookies.has(user));
@@ -54,6 +57,7 @@ before(async () => {
   addUser('manager-2', 'casemanager', 'manager2@example.test');
   addUser('psychologist-1', 'psychologist', 'psychologist@example.test');
   addUser('admin-1', 'admin', 'admin@example.test');
+  addUser('reset-user', 'employee', 'reset@example.test');
   db.prepare('UPDATE psychologists SET user_id = ? WHERE id = ?').run('psychologist-1', 'psy-1');
 
   const app = express();
@@ -70,11 +74,12 @@ after(async () => {
 });
 
 test('authentication requires terms, hashes credentials, and invalidates logout sessions', async () => {
-  const missingTerms = await call('/auth/login', {
+  const wrongAccountType = await call('/auth/login', {
     method: 'POST',
-    body: { email: 'one@example.test', password, termsAccepted: false },
+    body: { email: 'one@example.test', password, accountType: 'admin' },
   });
-  assert.equal(missingTerms.response.status, 400);
+
+  assert.equal(wrongAccountType.response.status, 401);
 
   await login('one@example.test', 'employee');
   const currentUser = await call('/auth/me', { user: 'employee' });
@@ -88,6 +93,62 @@ test('authentication requires terms, hashes credentials, and invalidates logout 
   const anonymousSession = await call('/auth/me');
   assert.equal(anonymousSession.response.status, 200);
   assert.equal(anonymousSession.data.user, null);
+});
+
+test('SQLite migrations and account data persist after reopening the database', () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'sejiwa-sqlite-'));
+  const databasePath = path.join(directory, 'sejiwa.sqlite');
+  let connection;
+  try {
+    connection = createDatabase(databasePath);
+    const salt = randomBytes(16).toString('hex');
+    connection.prepare(`
+      INSERT INTO users (id, full_name, email, role, password_hash, password_salt, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'persistent-user',
+      'Akun Persisten',
+      'persistent@example.test',
+      'employee',
+      scryptSync(password, salt, 64).toString('hex'),
+      salt,
+      new Date().toISOString(),
+    );
+    connection.close();
+    connection = null;
+
+    connection = createDatabase(databasePath);
+    const account = connection.prepare('SELECT email, role FROM users WHERE id = ?').get('persistent-user');
+    assert.equal(account.email, 'persistent@example.test');
+    assert.equal(account.role, 'employee');
+    const migrations = connection.prepare('SELECT name FROM schema_migrations ORDER BY name').all();
+    assert.ok(migrations.some((migration) => migration.name === '003_password_reset_tokens.sql'));
+    assert.equal(
+      connection.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'password_reset_tokens'").get().count,
+      1,
+    );
+  } finally {
+    connection?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('user and administrator sign-in are separated by account role', async () => {
+  const adminOnUserPortal = await call('/auth/login', {
+    method: 'POST',
+    body: { email: 'admin@example.test', password, accountType: 'user' },
+  });
+  assert.equal(adminOnUserPortal.response.status, 401);
+
+  const userOnAdminPortal = await call('/auth/login', {
+    method: 'POST',
+    body: { email: 'one@example.test', password, accountType: 'admin' },
+  });
+  assert.equal(userOnAdminPortal.response.status, 401);
+
+  const adminLogin = await login('admin@example.test', 'admin-portal', 'admin');
+  assert.equal(adminLogin.user.role, 'admin');
+  assert.equal(adminLogin.portal, 'admin');
 });
 
 test('public registration creates employee-only accounts and rejects duplicate email', async () => {
@@ -127,12 +188,55 @@ test('public registration creates employee-only accounts and rejects duplicate e
   assert.equal(duplicate.response.status, 409);
 });
 
+test('password reset is one-time, updates the password, and invalidates existing sessions', async () => {
+  await login('reset@example.test', 'reset-user');
+  const requestReset = await call('/auth/password-reset/request', {
+    method: 'POST',
+    body: { email: 'reset@example.test' },
+  });
+  assert.equal(requestReset.response.status, 202);
+  assert.ok(requestReset.data.resetUrl);
+  const token = new URL(requestReset.data.resetUrl).searchParams.get('resetToken');
+  assert.ok(token);
+
+  const rejectedShortPassword = await call('/auth/password-reset/confirm', {
+    method: 'POST',
+    body: { token, password: 'short' },
+  });
+  assert.equal(rejectedShortPassword.response.status, 400);
+
+  const reset = await call('/auth/password-reset/confirm', {
+    method: 'POST',
+    body: { token, password: 'New-Password-456!' },
+  });
+  assert.equal(reset.response.status, 200);
+  const reused = await call('/auth/password-reset/confirm', {
+    method: 'POST',
+    body: { token, password: 'Another-Password-789!' },
+  });
+  assert.equal(reused.response.status, 400);
+
+  const expiredSession = await call('/auth/me', { user: 'reset-user' });
+  assert.equal(expiredSession.data.user, null);
+  const oldPassword = await call('/auth/login', {
+    method: 'POST',
+    body: { email: 'reset@example.test', password, accountType: 'user' },
+  });
+  assert.equal(oldPassword.response.status, 401);
+  const newPassword = await call('/auth/login', {
+    user: 'reset-user-new',
+    method: 'POST',
+    body: { email: 'reset@example.test', password: 'New-Password-456!', accountType: 'user' },
+  });
+  assert.equal(newPassword.response.status, 200);
+});
+
 test('complaints persist with a ticket and are visible only to their owner and assigned case manager', async () => {
   await login('one@example.test', 'employee');
   await login('two@example.test', 'other');
   await login('manager@example.test', 'manager');
   await login('manager2@example.test', 'other-manager');
-  await login('admin@example.test', 'admin');
+  await login('admin@example.test', 'admin', 'admin');
 
   const invalid = await call('/complaints', {
     user: 'employee',
@@ -255,7 +359,7 @@ test('counseling messages persist and are scoped to the employee and assigned ps
 });
 
 test('administrator can manage publishing and profile availability without reading private conversations or complaints', async () => {
-  await login('admin@example.test', 'admin');
+  await login('admin@example.test', 'admin', 'admin');
 
   const deniedArticles = await call('/admin/articles', { user: 'employee' });
   assert.equal(deniedArticles.response.status, 403);
@@ -309,4 +413,34 @@ test('administrator can manage publishing and profile availability without readi
   assert.equal(adminInbox.data.threads.length, 0);
   assert.equal(adminInbox.data.cases.length, 0);
   assert.ok(adminInbox.data.metrics);
+
+  const listedArticles = await call('/admin/articles', { user: 'admin' });
+  assert.equal(listedArticles.data.articles.some((item) => item.id === articleId && !item.published), true);
+  const deletedArticle = await call(`/admin/articles/${articleId}`, {
+    user: 'admin',
+    method: 'DELETE',
+  });
+  assert.equal(deletedArticle.response.status, 204);
+  assert.equal((await call('/content')).data.articles.some((item) => item.id === articleId), false);
+  const missingArticle = await call(`/admin/articles/${articleId}`, {
+    user: 'admin',
+    method: 'DELETE',
+  });
+  assert.equal(missingArticle.response.status, 404);
+
+  const listedUsers = await call('/admin/users', { user: 'admin' });
+  assert.ok(listedUsers.data.users.some((item) => item.id === 'employee-1'));
+  const disableUser = await call('/admin/users/employee-1/active', {
+    user: 'admin',
+    method: 'PATCH',
+    body: { active: false },
+  });
+  assert.equal(disableUser.response.status, 204);
+  assert.equal((await call('/auth/me', { user: 'employee' })).data.user, null);
+  const enableUser = await call('/admin/users/employee-1/active', {
+    user: 'admin',
+    method: 'PATCH',
+    body: { active: true },
+  });
+  assert.equal(enableUser.response.status, 204);
 });
