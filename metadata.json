@@ -1,0 +1,6 @@
+{
+  "name": "SEJIWA — Platform Kesehatan Mental & EAP",
+  "description": "Platform kesejahteraan mental terpadu untuk publik, karyawan perusahaan, psikolog klinis, case manager, dan administrator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
