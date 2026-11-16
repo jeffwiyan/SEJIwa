@@ -6,11 +6,16 @@ process.env.DATABASE_PATH = ':memory:';
 process.env.NODE_ENV = 'production';
 
 const { default: handler } = await import('../api/[...route].mjs');
+const { default: nestedHandler } = await import('../api/handler.mjs');
 let server;
 let baseUrl;
 
 before(async () => {
-  server = createServer(handler);
+  server = createServer((request, response) => (
+    request.url.startsWith('/api/handler')
+      ? nestedHandler(request, response)
+      : handler(request, response)
+  ));
   server.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -42,4 +47,21 @@ test('Vercel catch-all handler returns JSON for unknown API endpoints', async ()
   assert.equal(response.status, 404);
   assert.match(response.headers.get('content-type'), /application\/json/);
   assert.deepEqual(await response.json(), { error: 'Endpoint API tidak ditemukan.' });
+});
+
+test('Vercel nested-route handler forwards auth, profile, and admin endpoints', async () => {
+  const anonymousSession = await fetch(`${baseUrl}/api/handler?__api_path=auth/me`);
+  assert.equal(anonymousSession.status, 200);
+  assert.deepEqual(await anonymousSession.json(), { user: null, portal: 'public' });
+
+  const unauthorizedAdmin = await fetch(`${baseUrl}/api/handler?__api_path=admin/articles`);
+  assert.equal(unauthorizedAdmin.status, 401);
+  assert.match(unauthorizedAdmin.headers.get('content-type'), /application\/json/);
+
+  const profile = await fetch(`${baseUrl}/api/handler?__api_path=profile`, { method: 'GET' });
+  assert.equal(profile.status, 404);
+  assert.deepEqual(await profile.json(), { error: 'Endpoint API tidak ditemukan.' });
+
+  const invalidPath = await fetch(`${baseUrl}/api/handler?__api_path=auth%2F..%2Fhealth`);
+  assert.equal(invalidPath.status, 404);
 });
