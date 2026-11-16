@@ -1,0 +1,45 @@
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { after, before, test } from 'node:test';
+
+process.env.DATABASE_PATH = ':memory:';
+process.env.NODE_ENV = 'production';
+
+const { default: handler } = await import('../api/[...route].mjs');
+let server;
+let baseUrl;
+
+before(async () => {
+  server = createServer(handler);
+  server.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  baseUrl = `http://127.0.0.1:${server.address().port}`;
+});
+
+after(async () => {
+  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+});
+
+test('Vercel catch-all handler serves API routes with and without the /api prefix', async () => {
+  const [health, normalizedHealth, session, content] = await Promise.all([
+    fetch(`${baseUrl}/api/health`),
+    fetch(`${baseUrl}/health`),
+    fetch(`${baseUrl}/api/auth/me`),
+    fetch(`${baseUrl}/api/content`),
+  ]);
+  assert.equal(health.status, 200);
+  assert.deepEqual(await health.json(), { status: 'ok' });
+  assert.equal(normalizedHealth.status, 200);
+  assert.deepEqual(await normalizedHealth.json(), { status: 'ok' });
+  assert.equal(session.status, 200);
+  assert.deepEqual(await session.json(), { user: null, portal: 'public' });
+  assert.equal(content.status, 200);
+  assert.equal((await content.json()).psychologists.length, 5);
+});
+
+test('Vercel catch-all handler returns JSON for unknown API endpoints', async () => {
+  const response = await fetch(`${baseUrl}/api/not-a-real-endpoint`);
+  assert.equal(response.status, 404);
+  assert.match(response.headers.get('content-type'), /application\/json/);
+  assert.deepEqual(await response.json(), { error: 'Endpoint API tidak ditemukan.' });
+});

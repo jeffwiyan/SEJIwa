@@ -46,6 +46,12 @@ npm start
 
 `npm start` serves the production bundle and API on port `3000` (or `PORT`). Use HTTPS in production; the session cookie is marked `Secure` when `--production` is used.
 
+### Deploying to Vercel
+
+`vercel.json` builds the Vite site, and `api/[...route].mjs` forwards `/api/*` requests to the existing Express API. Vercel provides environment variables in **Project Settings → Environment Variables**; redeploy after changing them.
+
+**Important:** Vercel's `/tmp` filesystem is temporary and isolated per serverless instance. The included Vercel adapter uses SQLite there only so the demo API can start; user accounts, conversations, and other writes are not durable or shared across instances. Do not use this Vercel SQLite mode for real users or sensitive information. For durable service, deploy the Express server on a host with a persistent volume, or migrate the database layer to a managed, persistent database before accepting accounts.
+
 ## Persistence and API
 
 - SQLite database path: `DATABASE_PATH` (default `./data/sejiwa.sqlite`).
