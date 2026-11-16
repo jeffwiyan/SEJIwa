@@ -123,8 +123,14 @@ test('SQLite migrations and account data persist after reopening the database', 
     assert.equal(account.role, 'employee');
     const migrations = connection.prepare('SELECT name FROM schema_migrations ORDER BY name').all();
     assert.ok(migrations.some((migration) => migration.name === '003_password_reset_tokens.sql'));
+    assert.ok(migrations.some((migration) => migration.name === '004_assistant_messages.sql'));
+    assert.ok(migrations.some((migration) => migration.name === '005_assistant_chat_messages.sql'));
     assert.equal(
       connection.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'password_reset_tokens'").get().count,
+      1,
+    );
+    assert.equal(
+      connection.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'assistant_messages'").get().count,
       1,
     );
   } finally {
@@ -356,6 +362,111 @@ test('counseling messages persist and are scoped to the employee and assigned ps
   assert.ok(markRead.data.readAt);
   const psychologistAfterRead = await call('/bootstrap', { user: 'psychologist' });
   assert.ok(psychologistAfterRead.data.threads[0].messages[1].readAt);
+});
+
+test('demo psychologist conversations return automated replies and keep them labeled safely', async () => {
+  await login('one@example.test', 'employee');
+  const created = await call('/conversations', {
+    user: 'employee',
+    method: 'POST',
+    body: { psychologistId: 'psy-2' },
+  });
+  assert.equal(created.response.status, 201);
+
+  const sent = await call(`/conversations/${created.data.conversationId}/messages`, {
+    user: 'employee',
+    method: 'POST',
+    body: { text: 'Saya merasa cemas menghadapi pekerjaan.' },
+  });
+  assert.equal(sent.response.status, 201);
+  const thread = sent.data.threads[0];
+  assert.equal(thread.assistantMode, true);
+  assert.match(thread.peerName, /AI otomatis/);
+  assert.equal(thread.messages.length, 2);
+  assert.equal(thread.messages[0].sender, 'user');
+  assert.equal(thread.messages[1].sender, 'peer');
+  assert.match(thread.messages[1].senderName, /Asisten SEJIWA/);
+  assert.match(thread.messages[1].text, /Bagian mana yang paling membebani/i);
+
+  const crisis = await call(`/conversations/${created.data.conversationId}/messages`, {
+    user: 'employee',
+    method: 'POST',
+    body: { text: 'Saya ingin mengakhiri hidup' },
+  });
+  assert.equal(crisis.data.threads[0].messages.at(-1).safety, 'urgent');
+
+  const bootstrap = await call('/bootstrap', { user: 'employee' });
+  assert.equal(bootstrap.data.threads[0].messages.length, 4);
+  assert.equal(bootstrap.data.threads[0].messages.at(-1).safety, 'urgent');
+});
+
+test('support assistant replies safely and keeps its history private to each employee', async () => {
+  await login('one@example.test', 'employee');
+  await login('two@example.test', 'other');
+  await login('psychologist@example.test', 'psychologist');
+  await login('admin@example.test', 'admin', 'admin');
+
+  const anonymousRequest = await call('/assistant/messages', {
+    method: 'POST',
+    body: { text: 'Saya merasa cemas' },
+  });
+  assert.equal(anonymousRequest.response.status, 401);
+
+  const psychologistRequest = await call('/assistant/messages', {
+    user: 'psychologist',
+    method: 'POST',
+    body: { text: 'Saya merasa cemas' },
+  });
+  assert.equal(psychologistRequest.response.status, 403);
+
+  const adminRequest = await call('/assistant/messages', {
+    user: 'admin',
+    method: 'POST',
+    body: { text: 'Saya merasa cemas' },
+  });
+  assert.equal(adminRequest.response.status, 403);
+
+  const invalidMessage = await call('/assistant/messages', {
+    user: 'employee',
+    method: 'POST',
+    body: { text: '   ' },
+  });
+  assert.equal(invalidMessage.response.status, 400);
+
+  const response = await call('/assistant/messages', {
+    user: 'employee',
+    method: 'POST',
+    body: { text: 'Saya merasa cemas menghadapi pekerjaan.' },
+  });
+  assert.equal(response.response.status, 201);
+  assert.equal(response.data.messages.length, 2);
+  assert.equal(response.data.messages[0].sender, 'user');
+  assert.equal(response.data.messages[1].sender, 'assistant');
+  assert.match(response.data.messages[1].body, /bukan diagnosis/i);
+
+  const crisis = await call('/assistant/messages', {
+    user: 'employee',
+    method: 'POST',
+    body: { text: 'Saya ingin mengakhiri hidup' },
+  });
+  assert.equal(crisis.response.status, 201);
+  assert.equal(crisis.data.messages.at(-1).safety, 'urgent');
+  assert.match(crisis.data.messages.at(-1).body, /layanan darurat setempat/i);
+
+  const englishCrisis = await call('/assistant/messages', {
+    user: 'employee',
+    method: 'POST',
+    body: { text: 'I want to die' },
+  });
+  assert.equal(englishCrisis.response.status, 201);
+  assert.equal(englishCrisis.data.messages.at(-1).safety, 'urgent');
+
+  const ownHistory = await call('/bootstrap', { user: 'employee' });
+  assert.equal(ownHistory.data.assistantMessages.length, 6);
+  const otherHistory = await call('/bootstrap', { user: 'other' });
+  assert.deepEqual(otherHistory.data.assistantMessages, []);
+  const psychologistHistory = await call('/bootstrap', { user: 'psychologist' });
+  assert.deepEqual(psychologistHistory.data.assistantMessages, []);
 });
 
 test('administrator can manage publishing and profile availability without reading private conversations or complaints', async () => {

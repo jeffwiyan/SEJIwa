@@ -6,6 +6,7 @@ import {
 } from 'node:crypto';
 import { Router } from 'express';
 import { createId, getPublicContent } from './db.mjs';
+import { respondToSupportQuestion } from './assistant.mjs';
 
 const SESSION_COOKIE = 'sejiwa_session';
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -168,13 +169,13 @@ function getVisibleConversations(db, user) {
   let rows = [];
   if (user.role === 'employee') {
     rows = db.prepare(`
-      SELECT c.*, p.data_json AS psychologist_json FROM conversations c
+      SELECT c.*, p.data_json AS psychologist_json, p.user_id AS psychologist_user_id FROM conversations c
       JOIN psychologists p ON p.id = c.psychologist_id
       WHERE c.employee_user_id = ? ORDER BY c.created_at DESC
     `).all(user.id);
   } else if (user.role === 'psychologist') {
     rows = db.prepare(`
-      SELECT c.*, p.data_json AS psychologist_json FROM conversations c
+      SELECT c.*, p.data_json AS psychologist_json, p.user_id AS psychologist_user_id FROM conversations c
       JOIN psychologists p ON p.id = c.psychologist_id
       WHERE p.user_id = ? ORDER BY c.created_at DESC
     `).all(user.id);
@@ -184,11 +185,14 @@ function getVisibleConversations(db, user) {
     const profile = JSON.parse(conversation.psychologist_json);
     const employee = db.prepare('SELECT full_name FROM users WHERE id = ?').get(conversation.employee_user_id);
     const isEmployee = user.role === 'employee';
-    const peerName = isEmployee ? profile.name : employee?.full_name || 'Karyawan';
+    const hasHumanPsychologist = Boolean(conversation.psychologist_user_id);
+    const peerName = isEmployee
+      ? hasHumanPsychologist ? profile.name : `${profile.name} · AI otomatis`
+      : employee?.full_name || 'Karyawan';
     const messages = db.prepare(`
-      SELECT m.id, m.body, m.created_at, m.sender_user_id, m.read_at, u.full_name, u.role
+      SELECT m.id, m.body, m.created_at, m.sender_user_id, m.sender_type, m.safety, m.read_at, u.full_name, u.role
       FROM messages m JOIN users u ON u.id = m.sender_user_id
-      WHERE m.conversation_id = ? ORDER BY m.created_at ASC
+      WHERE m.conversation_id = ? ORDER BY m.created_at ASC, m.rowid ASC
     `).all(conversation.id);
     const lastMessage = messages.at(-1);
     const unreadCount = db.prepare(`
@@ -200,19 +204,30 @@ function getVisibleConversations(db, user) {
       id: conversation.id,
       peerName,
       peerId: isEmployee ? conversation.psychologist_id : conversation.employee_user_id,
-      peerRole: isEmployee ? 'Psikolog · Profil demo' : 'Karyawan',
-      peerHandle: isEmployee ? profile.credentials : 'Percakapan privat',
+      peerRole: isEmployee
+        ? hasHumanPsychologist ? 'Psikolog' : 'Asisten otomatis · profil demo'
+        : 'Karyawan',
+      peerHandle: isEmployee
+        ? hasHumanPsychologist ? profile.credentials : 'Panduan umum · bukan psikolog manusia'
+        : 'Percakapan privat',
       peerAvatar: isEmployee ? profile.image : '',
-      status: 'Privat',
+      status: isEmployee && !hasHumanPsychologist
+        ? 'AI otomatis · bukan layanan darurat'
+        : 'Privat',
+      assistantMode: isEmployee && !hasHumanPsychologist,
       lastMessagePreview: lastMessage?.body || 'Belum ada pesan.',
       lastTime: lastMessage?.created_at || conversation.created_at,
       unreadCount,
       messages: messages.map((message) => ({
         id: message.id,
-        sender: message.sender_user_id === user.id
-          ? (isEmployee ? 'user' : 'peer')
-          : (isEmployee ? 'peer' : 'user'),
-        senderName: message.full_name,
+        sender: message.sender_type === 'assistant'
+          ? (isEmployee ? 'peer' : 'user')
+          : message.sender_user_id === user.id
+            ? (isEmployee ? 'user' : 'peer')
+            : (isEmployee ? 'peer' : 'user'),
+        senderName: message.sender_type === 'assistant'
+          ? 'Asisten SEJIWA · otomatis'
+          : message.full_name,
         text: message.body,
         timestamp: new Intl.DateTimeFormat('id-ID', {
           dateStyle: 'medium',
@@ -220,9 +235,22 @@ function getVisibleConversations(db, user) {
           timeZone: 'Asia/Jakarta',
         }).format(new Date(message.created_at)),
         readAt: message.read_at,
+        safety: message.safety,
       })),
     };
   });
+}
+
+function getAssistantMessages(db, userId) {
+  return db.prepare(`
+    SELECT id, sender, body, safety, created_at AS createdAt
+    FROM assistant_messages
+    WHERE user_id = ? AND id IN (
+      SELECT id FROM assistant_messages
+      WHERE user_id = ? ORDER BY rowid DESC LIMIT 100
+    )
+    ORDER BY rowid ASC
+  `).all(userId, userId);
 }
 
 function validateCredentials(email, password) {
@@ -505,6 +533,9 @@ export function createApiRouter(db) {
       articles: content.articles,
       cases: getVisibleComplaints(db, request.user),
       threads: getVisibleConversations(db, request.user),
+      assistantMessages: request.user.role === 'employee'
+        ? getAssistantMessages(db, request.user.id)
+        : [],
       notifications,
     };
     if (request.user.role === 'admin') {
@@ -627,6 +658,32 @@ export function createApiRouter(db) {
     return response.json({ complaint: toComplaint(db, updated, request.user.role) });
   });
 
+  router.post('/assistant/messages', requireRole('employee'), (request, response) => {
+    const body = request.body?.text;
+    if (typeof body !== 'string' || !body.trim() || body.trim().length > 1500) {
+      return response.status(400).json({ error: 'Pesan wajib diisi dan maksimal 1.500 karakter.' });
+    }
+
+    const answer = respondToSupportQuestion(body.trim());
+    const createdAt = now();
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare(`
+        INSERT INTO assistant_messages (id, user_id, sender, body, created_at)
+        VALUES (?, ?, 'user', ?, ?)
+      `).run(createId('assistant-message'), request.user.id, body.trim(), createdAt);
+      db.prepare(`
+        INSERT INTO assistant_messages (id, user_id, sender, body, safety, created_at)
+        VALUES (?, ?, 'assistant', ?, ?, ?)
+      `).run(createId('assistant-message'), request.user.id, answer.text, answer.safety, createdAt);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+    return response.status(201).json({ messages: getAssistantMessages(db, request.user.id) });
+  });
+
   router.post('/conversations', requireRole('employee'), (request, response) => {
     const psychologistId = request.body?.psychologistId;
     if (typeof psychologistId !== 'string') return response.status(400).json({ error: 'Pilih profil yang tersedia.' });
@@ -689,14 +746,30 @@ export function createApiRouter(db) {
       return response.status(404).json({ error: 'Percakapan tidak ditemukan.' });
     }
     const createdAt = now();
-    db.prepare(`
-      INSERT INTO messages (id, conversation_id, sender_user_id, body, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(createId('message'), conversation.id, request.user.id, body.trim(), createdAt);
-    const recipient = request.user.role === 'employee'
-      ? conversation.psychologist_user_id
-      : conversation.employee_user_id;
-    if (recipient) addNotification(db, recipient, 'Pesan baru', 'Anda menerima pesan di percakapan konseling.');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare(`
+        INSERT INTO messages (id, conversation_id, sender_user_id, body, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(createId('message'), conversation.id, request.user.id, body.trim(), createdAt);
+
+      if (request.user.role === 'employee' && !conversation.psychologist_user_id) {
+        const answer = respondToSupportQuestion(body.trim());
+        db.prepare(`
+          INSERT INTO messages (id, conversation_id, sender_user_id, body, created_at, sender_type, safety)
+          VALUES (?, ?, ?, ?, ?, 'assistant', ?)
+        `).run(createId('message'), conversation.id, request.user.id, answer.text, now(), answer.safety);
+      }
+
+      const recipient = request.user.role === 'employee'
+        ? conversation.psychologist_user_id
+        : conversation.employee_user_id;
+      if (recipient) addNotification(db, recipient, 'Pesan baru', 'Anda menerima pesan di percakapan konseling.');
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
     return response.status(201).json({ threads: getVisibleConversations(db, request.user) });
   });
 

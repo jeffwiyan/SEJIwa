@@ -1,5 +1,6 @@
 import type {
   CaseStatus,
+  AssistantMessage,
   ChatThread,
   ComplaintCase,
   PortalMode,
@@ -30,6 +31,7 @@ export interface AppBootstrap extends AuthResponse {
   articles: PsychologyArticle[];
   cases: ComplaintCase[];
   threads: ChatThread[];
+  assistantMessages: AssistantMessage[];
   notifications: NotificationItem[];
   metrics?: {
     users: {
@@ -160,6 +162,12 @@ export const api = {
 
   sendMessage: (conversationId: string, text: string) =>
     request<{ threads: ChatThread[] }>(`/conversations/${encodeURIComponent(conversationId)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+
+  sendAssistantMessage: (text: string) =>
+    request<{ messages: AssistantMessage[] }>('/assistant/messages', {
       method: 'POST',
       body: JSON.stringify({ text }),
     }),

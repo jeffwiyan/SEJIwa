@@ -2,7 +2,7 @@
 
 SEJIWA (Sejahtera Jiwa, Wadah Aman) is a TypeScript/React web app with an Express API and a persistent SQLite database. The existing public site and role-specific portals are connected to the API for authentication, profile updates, education content, private counseling messages, complaint tracking, notifications, and administrative account/content management.
 
-> **Demonstration environment:** sample psychologist profiles and articles are illustrative only. Provider credentials and service availability have not been verified. This app is not a diagnosis, clinical service, or emergency service.
+> **Demonstration environment:** sample psychologist profiles and articles are illustrative only. Provider credentials and service availability have not been verified. Messages to unassigned demo profiles receive curated topic-based automatic replies; these are not written by a psychologist or a generative AI. This app is not a diagnosis, clinical service, or emergency service.
 
 ## Requirements
 
@@ -22,7 +22,7 @@ Edit `.env.local` only if you need explicitly configured demonstration accounts.
 npm run dev
 ```
 
-Open `http://localhost:3000`. Register a user account to access psychologist discovery, private conversations, educational content, and complaint tracking.
+Open `http://localhost:3000`. Register a user account to access psychologist discovery, private conversations, the automated support assistant, educational content, and complaint tracking.
 
 ### Administrator access
 
@@ -64,6 +64,8 @@ To enable an administrator login, add `DEMO_ADMIN_EMAIL` and `DEMO_ADMIN_PASSWOR
 - Password reset uses single-use, 30-minute tokens and invalidates existing sessions. In development the reset link is shown on screen. For production, configure `RESEND_API_KEY`, `PASSWORD_RESET_FROM`, and the HTTPS `APP_BASE_URL` to deliver reset links using Resend.
 - API endpoints include `/api/auth/*`, `/api/bootstrap`, `/api/profile`, `/api/content`, `/api/complaints`, `/api/conversations`, `/api/notifications`, and `/api/admin/*`.
 - Employee complaint and conversation queries are scoped to their account. Case managers can see only assigned complaints. Admin APIs expose aggregate complaint counts, not report text or private counseling conversations.
+- The employee support assistant gives topic-based, curated general guidance locally; it does not send message content to an external AI provider. It is not a psychologist, cannot diagnose or advise on medication, and directs urgent safety concerns to local emergency services or a nearby emergency department. Assistant messages are stored per employee in SQLite.
+- Messages to illustrative psychologist profiles that are not linked to a staff account receive an automatic SEJIWA guidance reply in that same conversation. Real staff-linked psychologist conversations remain human-only. The demo bot is not generative AI and is clearly labeled in the chat.
 - Chat updates are fetched by the application every 15 seconds while signed in; messaging is not WebSocket real-time.
 
 ## Operational limitations
@@ -76,4 +78,4 @@ To enable an administrator login, add `DEMO_ADMIN_EMAIL` and `DEMO_ADMIN_PASSWOR
 
 ## Validation
 
-The automated tests cover user registration, separated user/admin login, one-time password reset and session invalidation, SQLite persistence and migrations, role-based complaint ownership and status updates, scoped counseling messages, admin article publication, profile availability, and audit records.
+The automated tests cover user registration, separated user/admin login, one-time password reset and session invalidation, SQLite persistence and migrations, role-based complaint ownership and status updates, scoped counseling and assistant messages, automated replies for demo psychologist profiles, safe crisis responses, admin article publication, profile availability, and audit records.

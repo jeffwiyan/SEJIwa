@@ -16,6 +16,10 @@
       "destination": "/api/handler?__api_path=bootstrap"
     },
     {
+      "source": "/api/assistant/messages",
+      "destination": "/api/handler?__api_path=assistant/messages"
+    },
+    {
       "source": "/api/complaints",
       "destination": "/api/handler?__api_path=complaints"
     },

@@ -91,4 +91,17 @@ test('Vercel handler shares registration and bootstrap sessions within the same 
   const data = await bootstrap.json();
   assert.equal(data.user.id, user.id);
   assert.equal(data.user.email, email);
+
+  const assistantMessage = await fetch(`${baseUrl}/api/handler?__api_path=assistant/messages`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ text: 'Saya merasa cemas menghadapi pekerjaan.' }),
+  });
+  assert.equal(assistantMessage.status, 201);
+  const assistantData = await assistantMessage.json();
+  assert.equal(assistantData.messages.at(-1).sender, 'assistant');
+  assert.match(assistantData.messages.at(-1).body, /tekanan pekerjaan/i);
 });

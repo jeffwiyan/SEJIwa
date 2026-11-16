@@ -12,6 +12,7 @@ import {
   Send,
   Settings,
   ShieldAlert,
+  Sparkles,
   UserCheck,
   Users,
 } from 'lucide-react';
@@ -22,6 +23,7 @@ import type {
   PortalMode,
   Psychologist,
   PsychologyArticle,
+  AssistantMessage,
 } from '../../types/sejiwa';
 import { ASSETS } from '../../data/seedData';
 import {
@@ -39,9 +41,11 @@ interface EmployeeAppProps {
   psychologists: Psychologist[];
   articles: PsychologyArticle[];
   bookedPsychologistIds: string[];
-  onBookPsychologist: (psychologist: Psychologist) => void;
+  onBookPsychologist: (psychologist: Psychologist) => Promise<string | undefined>;
   threads: ChatThread[];
   onSendMessage: (threadId: string, text: string) => Promise<void>;
+  assistantMessages: AssistantMessage[];
+  onSendAssistantMessage: (text: string) => Promise<void>;
   onMarkConversationRead: (threadId: string) => Promise<void>;
   cases: ComplaintCase[];
   onSubmitComplaint: (draft: ComplaintDraftPayload) => Promise<ComplaintCase>;
@@ -62,6 +66,8 @@ export function EmployeeApp({
   onBookPsychologist,
   threads,
   onSendMessage,
+  assistantMessages,
+  onSendAssistantMessage,
   onMarkConversationRead,
   cases,
   onSubmitComplaint,
@@ -79,7 +85,7 @@ export function EmployeeApp({
   const [selectedArticle, setSelectedArticle] = useState<PsychologyArticle | null>(null);
   const [articleCategory, setArticleCategory] = useState<string>('Semua');
 
-  const [activeThreadId, setActiveThreadId] = useState<string>(threads[0]?.id || '');
+  const [activeThreadId, setActiveThreadId] = useState<string>(threads[0]?.id || 'support-assistant');
   const [chatInput, setChatInput] = useState('');
   const [chatError, setChatError] = useState('');
   const [sendingMessage, setSendingMessage] = useState(false);
@@ -121,7 +127,38 @@ export function EmployeeApp({
     acceptingOnly,
   });
 
-  const activeThread = threads.find((t) => t.id === activeThreadId) || threads[0];
+  const latestAssistantMessage = assistantMessages.at(-1);
+  const assistantThread: ChatThread = {
+    id: 'support-assistant',
+    peerName: 'Asisten SEJIWA',
+    peerRole: 'Asisten dukungan otomatis',
+    peerHandle: 'Panduan umum · bukan psikolog',
+    peerAvatar: ASSETS.mindfulnessCalm,
+    status: 'Otomatis · bukan layanan darurat',
+    lastMessagePreview: latestAssistantMessage?.body || 'Tanya tentang dukungan umum',
+    lastTime: latestAssistantMessage
+      ? new Intl.DateTimeFormat('id-ID', { timeStyle: 'short', timeZone: 'Asia/Jakarta' })
+        .format(new Date(latestAssistantMessage.createdAt))
+      : '',
+    unreadCount: 0,
+    messages: assistantMessages.map((message) => ({
+      id: message.id,
+      sender: message.sender === 'user' ? 'user' : 'peer',
+      senderName: message.sender === 'user' ? user.name : 'Asisten SEJIWA · otomatis',
+      text: message.body,
+      timestamp: new Intl.DateTimeFormat('id-ID', {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+        timeZone: 'Asia/Jakarta',
+      }).format(new Date(message.createdAt)),
+      safety: message.safety,
+    })),
+  };
+  const activeThread = activeThreadId === assistantThread.id
+    ? assistantThread
+    : threads.find((thread) => thread.id === activeThreadId) || threads[0] || assistantThread;
+  const isAssistantThread = activeThread.id === assistantThread.id;
+  const isAutomatedConversation = isAssistantThread || Boolean(activeThread.assistantMode);
 
   useEffect(() => {
     if (activeView !== 'chat' || !activeThread || activeThread.unreadCount === 0) return;
@@ -137,7 +174,8 @@ export function EmployeeApp({
     setSendingMessage(true);
     setChatError('');
     try {
-      await onSendMessage(activeThread.id, trimmed);
+      if (isAssistantThread) await onSendAssistantMessage(trimmed);
+      else await onSendMessage(activeThread.id, trimmed);
       setChatInput('');
     } catch (error) {
       setChatError(error instanceof Error ? error.message : 'Pesan belum dapat dikirim.');
@@ -733,7 +771,11 @@ export function EmployeeApp({
                               <button
                                 type="button"
                                 disabled={!psy.acceptingClients && !isBooked}
-                                onClick={() => onBookPsychologist(psy)}
+                                onClick={() => {
+                                  onBookPsychologist(psy).then((conversationId) => {
+                                    if (conversationId) setActiveThreadId(conversationId);
+                                  });
+                                }}
                                 className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
                                   isBooked
                                     ? 'bg-[#E6F4EA] text-[#14532D] border border-[#BBF7D0]'
@@ -761,15 +803,27 @@ export function EmployeeApp({
               {/* Left Thread List */}
               <div className="lg:col-span-3 border-b lg:border-b-0 lg:border-r border-[#E6EBE6] flex flex-col">
                 <div className="p-4 border-b border-[#E6EBE6]">
-                  <h1 className="text-sm font-semibold text-[#17221B]">Pesan Konseling</h1>
-                  <p className="text-xs text-[#52635A] mt-0.5">Percakapan privat antara Anda dan psikolog terkait</p>
+                  <h1 className="text-sm font-semibold text-[#17221B]">Pesan &amp; Dukungan</h1>
+                  <p className="text-xs text-[#52635A] mt-0.5">Pilih asisten otomatis atau percakapan psikolog</p>
                 </div>
                 <div className="divide-y divide-[#F0F3F0]">
-                  {threads.length === 0 && (
-                    <p className="p-5 text-xs leading-relaxed text-[#52635A]">
-                      Belum ada percakapan. Pilih profil untuk memulai komunikasi.
-                    </p>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => setActiveThreadId(assistantThread.id)}
+                    className={`w-full text-left p-4 flex items-start gap-3 transition-colors cursor-pointer ${
+                      isAssistantThread ? 'bg-[#F2F6F2]' : 'hover:bg-[#F9FAF8]'
+                    }`}
+                  >
+                    <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0 bg-[#E6F4EA] text-[#1E3A2F]">
+                      <Sparkles className="w-5 h-5" aria-hidden="true" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-semibold text-[#17221B]">Asisten SEJIWA</p>
+                      <p className="text-xs text-[#52635A] truncate mt-1">
+                        {assistantThread.lastMessagePreview}
+                      </p>
+                    </div>
+                  </button>
                   {threads.map((thread) => {
                     const isSelected = thread.id === activeThread?.id;
                     return (
@@ -824,11 +878,37 @@ export function EmployeeApp({
                         onClick={() => onChangeView('psychologists')}
                         className="px-3 py-1.5 text-xs font-medium text-[#1E3A2F] border border-[#D4DDD6] hover:bg-[#EFF3EF] rounded-lg cursor-pointer"
                       >
-                        Lihat Profil
+                        {isAssistantThread ? 'Cari Psikolog' : 'Lihat Profil'}
                       </button>
                     </div>
 
                     <div className="flex-1 p-5 space-y-4 overflow-y-auto max-h-[420px] bg-[#FAFBF9]">
+                      {isAssistantThread && assistantMessages.length === 0 && (
+                        <div className="max-w-lg mx-auto rounded-xl border border-[#D4DDD6] bg-white p-4 text-sm text-[#52635A]">
+                          <p className="font-semibold text-[#17221B]">Asisten otomatis, bukan psikolog</p>
+                          <p className="mt-1 leading-relaxed">
+                            Jawaban dibuat dari panduan umum tanpa mengirim pesanmu ke layanan AI eksternal.
+                            Asisten tidak mendiagnosis atau menggantikan tenaga profesional.
+                          </p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {['Saya merasa cemas', 'Saya kewalahan dengan pekerjaan', 'Saya sulit tidur'].map((prompt) => (
+                              <button
+                                key={prompt}
+                                type="button"
+                                onClick={() => setChatInput(prompt)}
+                                className="rounded-full border border-[#D4DDD6] px-3 py-1.5 text-xs text-[#1E3A2F] hover:bg-[#F2F6F2]"
+                              >
+                                {prompt}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {activeThread.assistantMode && (
+                        <div className="rounded-lg border border-[#FDE68A] bg-[#FFFBEB] px-4 py-3 text-xs leading-relaxed text-[#78350F]">
+                          <strong>Balasan otomatis untuk profil demonstrasi.</strong> Pesanmu dijawab oleh panduan terstruktur SEJIWA, bukan oleh psikolog manusia atau AI generatif. Ini bukan diagnosis atau layanan darurat.
+                        </div>
+                      )}
                       {activeThread.messages.map((msg) => (
                         <div
                           key={msg.id}
@@ -843,7 +923,9 @@ export function EmployeeApp({
                           </div>
                           <div
                             className={`max-w-[85%] rounded-xl px-4 py-2.5 text-sm leading-relaxed ${
-                              msg.sender === 'user'
+                              msg.safety === 'urgent'
+                                ? 'bg-[#FEF2F2] border border-[#FECACA] text-[#7F1D1D]'
+                                : msg.sender === 'user'
                                 ? 'bg-[#1E3A2F] text-white'
                                 : 'bg-white border border-[#E2E8E2] text-[#17221B]'
                             }`}
@@ -867,14 +949,14 @@ export function EmployeeApp({
                       className="p-4 border-t border-[#E6EBE6] bg-white flex items-center gap-3"
                     >
                       <label htmlFor="employee-chat-input" className="sr-only">
-                        Tulis pesan konseling
+                        {isAutomatedConversation ? 'Tulis pertanyaan untuk Asisten SEJIWA' : 'Tulis pesan konseling'}
                       </label>
                       <input
                         id="employee-chat-input"
                         type="text"
                         value={chatInput}
                         onChange={(e) => setChatInput(e.target.value)}
-                        placeholder="Tulis pesan tindak lanjut untuk psikolog..."
+                        placeholder={isAutomatedConversation ? 'Tulis pertanyaan atau ceritakan situasimu...' : 'Tulis pesan tindak lanjut untuk psikolog...'}
                         className="flex-1 px-3.5 py-2 text-sm bg-[#F8FAF8] border border-[#D4DDD6] rounded-lg focus:outline-none focus:border-[#1E3A2F]"
                       />
                       <button
@@ -933,8 +1015,17 @@ export function EmployeeApp({
                       </div>
                       <div>
                         <p className="font-semibold text-[#17221B]">Informasi layanan</p>
-                        <p className="mt-1">Jadwal konseling belum dikonfigurasi untuk demonstrasi ini.</p>
+                        <p className="mt-1">
+                          {isAutomatedConversation
+                            ? 'Jawaban otomatis berbasis panduan umum. Tidak melakukan diagnosis dan bukan layanan darurat.'
+                            : 'Jadwal konseling belum dikonfigurasi untuk demonstrasi ini.'}
+                        </p>
                       </div>
+                      {isAssistantThread && (
+                        <p className="rounded-lg border border-[#FECACA] bg-[#FEF2F2] p-3 text-[#7F1D1D]">
+                          Jika kamu merasa dalam bahaya langsung, hubungi layanan darurat setempat atau pergi ke IGD terdekat.
+                        </p>
+                      )}
                     </div>
                   </>
                 )}

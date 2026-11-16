@@ -113,8 +113,10 @@ export default function App() {
       const result = await api.createConversation(psychologist.id);
       setBootstrap((current) => current ? { ...current, threads: result.threads } : current);
       setEmployeeView('chat');
+      return result.conversationId;
     } catch (error) {
       setPortalError(error instanceof Error ? error.message : 'Percakapan belum dapat dibuat.');
+      return undefined;
     }
   };
 
@@ -125,6 +127,19 @@ export default function App() {
       setPortalError('');
     } catch (error) {
       setPortalError(error instanceof Error ? error.message : 'Pesan belum dapat dikirim.');
+      throw error;
+    }
+  };
+
+  const handleSendAssistantMessage = async (text: string) => {
+    try {
+      const result = await api.sendAssistantMessage(text);
+      setBootstrap((current) => current
+        ? { ...current, assistantMessages: result.messages }
+        : current);
+      setPortalError('');
+    } catch (error) {
+      setPortalError(error instanceof Error ? error.message : 'Pesan belum dapat dijawab.');
       throw error;
     }
   };
@@ -248,9 +263,11 @@ export default function App() {
           psychologists={content.psychologists}
           articles={content.articles}
           bookedPsychologistIds={bookedPsychologistIds}
-          onBookPsychologist={(psychologist) => void handleBookPsychologist(psychologist)}
+          onBookPsychologist={handleBookPsychologist}
           threads={content.threads}
           onSendMessage={handleSendMessage}
+          assistantMessages={bootstrap.assistantMessages}
+          onSendAssistantMessage={handleSendAssistantMessage}
           onMarkConversationRead={handleMarkConversationRead}
           cases={content.cases}
           onSubmitComplaint={handleSubmitComplaint}

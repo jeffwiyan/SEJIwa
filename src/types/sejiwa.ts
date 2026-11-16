@@ -60,6 +60,7 @@ export interface ChatMessage {
   text: string;
   timestamp: string;
   readAt?: string | null;
+  safety?: 'standard' | 'urgent';
   attachment?: {
     name: string;
     size: string;
@@ -74,10 +75,19 @@ export interface ChatThread {
   peerHandle: string;
   peerAvatar: string;
   status: string;
+  assistantMode?: boolean;
   lastMessagePreview: string;
   lastTime: string;
   unreadCount: number;
   messages: ChatMessage[];
+}
+
+export interface AssistantMessage {
+  id: string;
+  sender: 'user' | 'assistant';
+  body: string;
+  safety: 'standard' | 'urgent';
+  createdAt: string;
 }
 
 export type CasePriority = 'High' | 'Medium' | 'Low';
