@@ -4,8 +4,24 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
-      "source": "/api/:first/:rest+",
-      "destination": "/api/handler?__api_path=:first/:rest+"
+      "source": "/api/auth/:rest*",
+      "destination": "/api/handler?__api_path=auth/:rest*"
+    },
+    {
+      "source": "/api/admin/:rest*",
+      "destination": "/api/handler?__api_path=admin/:rest*"
+    },
+    {
+      "source": "/api/complaints/:id/:rest*",
+      "destination": "/api/handler?__api_path=complaints/:id/:rest*"
+    },
+    {
+      "source": "/api/conversations/:id/:rest*",
+      "destination": "/api/handler?__api_path=conversations/:id/:rest*"
+    },
+    {
+      "source": "/api/notifications/:id/:rest*",
+      "destination": "/api/handler?__api_path=notifications/:id/:rest*"
     }
   ],
   "functions": {
