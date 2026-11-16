@@ -65,3 +65,30 @@ test('Vercel nested-route handler forwards auth, profile, and admin endpoints', 
   const invalidPath = await fetch(`${baseUrl}/api/handler?__api_path=auth%2F..%2Fhealth`);
   assert.equal(invalidPath.status, 404);
 });
+
+test('Vercel handler shares registration and bootstrap sessions within the same function', async () => {
+  const email = `vercel-${Date.now()}@example.test`;
+  const register = await fetch(`${baseUrl}/api/handler?__api_path=auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Pengguna Vercel',
+      email,
+      password: 'Vercel-Test-Password-123!',
+      termsAccepted: true,
+    }),
+  });
+  assert.equal(register.status, 200);
+  const { user } = await register.json();
+  assert.equal(user.email, email);
+  const cookie = register.headers.get('set-cookie')?.split(';')[0];
+  assert.ok(cookie);
+
+  const bootstrap = await fetch(`${baseUrl}/api/handler?__api_path=bootstrap`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(bootstrap.status, 200);
+  const data = await bootstrap.json();
+  assert.equal(data.user.id, user.id);
+  assert.equal(data.user.email, email);
+});

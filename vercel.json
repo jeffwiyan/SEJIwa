@@ -4,6 +4,34 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
+      "source": "/api/health",
+      "destination": "/api/handler?__api_path=health"
+    },
+    {
+      "source": "/api/content",
+      "destination": "/api/handler?__api_path=content"
+    },
+    {
+      "source": "/api/bootstrap",
+      "destination": "/api/handler?__api_path=bootstrap"
+    },
+    {
+      "source": "/api/complaints",
+      "destination": "/api/handler?__api_path=complaints"
+    },
+    {
+      "source": "/api/conversations",
+      "destination": "/api/handler?__api_path=conversations"
+    },
+    {
+      "source": "/api/notifications",
+      "destination": "/api/handler?__api_path=notifications"
+    },
+    {
+      "source": "/api/profile",
+      "destination": "/api/handler?__api_path=profile"
+    },
+    {
       "source": "/api/auth/:rest*",
       "destination": "/api/handler?__api_path=auth/:rest*"
     },
