@@ -50,6 +50,8 @@ npm start
 
 `vercel.json` builds the Vite site, and `api/[...route].mjs` forwards `/api/*` requests to the existing Express API. Vercel provides environment variables in **Project Settings → Environment Variables**; redeploy after changing them.
 
+To enable an administrator login, add `DEMO_ADMIN_EMAIL` and `DEMO_ADMIN_PASSWORD` in the Vercel project settings for the **Production** environment, then redeploy. The password must have at least 12 characters. Do not put credentials in `.env.example`, source files, or Git commits; the example file intentionally keeps all demo credentials blank. Environment variables configured only in the GitHub repository do not automatically configure a Vercel project.
+
 **Important:** Vercel's `/tmp` filesystem is temporary and isolated per serverless instance. The included Vercel adapter uses SQLite there only so the demo API can start; user accounts, conversations, and other writes are not durable or shared across instances. Do not use this Vercel SQLite mode for real users or sensitive information. For durable service, deploy the Express server on a host with a persistent volume, or migrate the database layer to a managed, persistent database before accepting accounts.
 
 ## Persistence and API
